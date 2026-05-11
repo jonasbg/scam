@@ -273,6 +273,7 @@ func main() {
 
 	synced.Store(true)
 	collector.Log.Info("streaming events")
+	go collector.SnapshotLoop(ctx, podInf)
 
 	<-ctx.Done()
 	collector.Log.Info("shutdown")
