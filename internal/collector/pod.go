@@ -1,70 +1,16 @@
 package collector
 
 import (
-	"context"
-	"math/rand"
-	"os"
-	"strings"
-	"time"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 )
 
-const defaultSnapshotInterval = 6 * time.Hour
-
-// SnapshotLoop periodically emits a full pod/container snapshot and a compact
-// authoritative key list. SPAM uses the key list to tombstone Container rows
-// that were missed because an informer DELETE/update event or push was lost.
-// The initial snapshot fires inline from main() right after cache sync;
-// this loop only handles the periodic re-emit.
-func SnapshotLoop(ctx context.Context, podInf coreinformers.PodInformer) {
-	interval := resolveSnapshotInterval()
-	if interval <= 0 {
-		Log.Info("snapshot: disabled")
-		return
-	}
-
-	firstDelay := interval
-	if interval > time.Minute {
-		firstDelay = time.Duration(rand.Int63n(int64(interval)))
-	}
-	Log.Info("snapshot: scheduled", "interval", interval, "first_delay", firstDelay)
-
-	timer := time.NewTimer(firstDelay)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-
-		EmitContainerSnapshot(podInf)
-		timer.Reset(interval)
-	}
-}
-
-func resolveSnapshotInterval() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("SNAPSHOT_INTERVAL"))
-	if raw == "" {
-		return defaultSnapshotInterval
-	}
-	if strings.EqualFold(raw, "off") || strings.EqualFold(raw, "disabled") || raw == "0" {
-		return 0
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d < time.Minute {
-		Log.Warn("snapshot: invalid SNAPSHOT_INTERVAL, using default",
-			"value", raw, "default", defaultSnapshotInterval)
-		return defaultSnapshotInterval
-	}
-	return d
-}
-
-func EmitContainerSnapshot(inf coreinformers.PodInformer) {
+// EmitContainerSnapshot emits per-container INITIAL records plus a
+// SNAPSHOT log line carrying the authoritative pod_uid/container_name
+// key list. The snapshotID groups it with the SNAPSHOT_BEGIN/_END
+// envelope emitted by EmitFullSnapshot.
+func EmitContainerSnapshot(inf coreinformers.PodInformer, snapshotID string) {
 	pods, err := inf.Lister().List(labels.Everything())
 	if err != nil {
 		Log.Error("snapshot: list pods", "err", err)
@@ -77,11 +23,7 @@ func EmitContainerSnapshot(inf coreinformers.PodInformer) {
 			keys = append(keys, string(p.UID)+"/"+c.name)
 		}
 	}
-	Log.Info("SNAPSHOT",
-		"kind", "Snapshot",
-		"target_kind", "Container",
-		"resource_keys", keys,
-	)
+	emitSnapshotKeys(snapshotID, "Container", keys)
 }
 
 func lessPod(a, b *corev1.Pod) bool {

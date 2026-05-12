@@ -258,22 +258,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ---- initial sorted snapshot per kind ------------------------------
-	collector.EmitContainerSnapshot(podInf)
-	for _, gvr := range gwGVRs {
-		collector.DumpGatewayAPI(gvr, gwInformers[gvr.String()])
+	// ---- initial full-state snapshot -----------------------------------
+	// All tracked kinds emitted together inside a SNAPSHOT_BEGIN/_END
+	// envelope so SPAM can tombstone whatever lingered from before this
+	// process started. SnapshotLoop fires the periodic reconcile.
+	rs := collector.SnapshotResources{
+		Pods:           podInf,
+		Services:       svcInf,
+		EndpointSlices: esInf,
+		Ingresses:      ingInf,
+		IngressClasses: icInf,
+		GatewayAPI:     collector.BuildDynamicSnapshots(gwGVRs, gwInformers),
+		Traefik:        collector.BuildDynamicSnapshots(trGVRs, trInformers),
 	}
-	for _, gvr := range trGVRs {
-		collector.DumpTraefik(gvr, trInformers[gvr.String()])
-	}
-	collector.DumpIngresses(ingInf)
-	collector.DumpIngressClasses(icInf)
-	collector.DumpServices(svcInf)
-	collector.DumpEndpointSlices(esInf)
+	collector.EmitFullSnapshot(rs, "init")
 
 	synced.Store(true)
 	collector.Log.Info("streaming events")
-	go collector.SnapshotLoop(ctx, podInf)
+	go collector.SnapshotLoop(ctx, rs)
 
 	<-ctx.Done()
 	collector.Log.Info("shutdown")

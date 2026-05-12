@@ -2,8 +2,6 @@ package collector
 
 import (
 	discoveryv1 "k8s.io/api/discovery/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	discoveryinformers "k8s.io/client-go/informers/discovery/v1"
 )
 
 type epEndpoint struct {
@@ -18,19 +16,6 @@ type epPort struct {
 	Name     string `json:"name,omitempty"`
 	Port     int32  `json:"port,omitempty"`
 	Protocol string `json:"protocol,omitempty"`
-}
-
-func DumpEndpointSlices(inf discoveryinformers.EndpointSliceInformer) {
-	list, err := inf.Lister().List(labels.Everything())
-	if err != nil {
-		Log.Error("list endpointslices", "err", err)
-		return
-	}
-	DumpSorted("EndpointSlice", list,
-		func(a, b *discoveryv1.EndpointSlice) bool {
-			return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name)
-		},
-		func(es *discoveryv1.EndpointSlice) int { EmitEndpointSlice("INITIAL", es); return 1 })
 }
 
 func EmitEndpointSlice(event string, es *discoveryv1.EndpointSlice) {
