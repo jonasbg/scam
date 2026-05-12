@@ -109,15 +109,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Re-resolve capture for push loop now that logger is configured.
+	// LineCapture + logger get set up here so every subsequent log line
+	// (informer setup, cache sync, the initial snapshot) is buffered for
+	// push. PushLoop itself starts later — once podInf exists — so the
+	// ACK-mismatch trigger has a snapshot target to fire.
+	var pushCapture *collector.LineCapture
+	var pushEndpoint string
 	if callcenterURL != "" {
-		// Reconstruct capture from the logger's writer. Since we set it above,
-		// just create a fresh one with the configured logger.
-		capture := &collector.LineCapture{Stdout: os.Stdout}
-		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(capture), &slog.HandlerOptions{Level: slog.LevelInfo}))
+		pushCapture = &collector.LineCapture{Stdout: os.Stdout}
+		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(pushCapture), &slog.HandlerOptions{Level: slog.LevelInfo}))
 		collector.Log = collector.Log.With(clusterAttrs...)
 		base := strings.TrimRight(callcenterURL, "/")
-		go collector.PushLoop(ctx, base+"/api/scam/callcenter", capture)
+		pushEndpoint = base + "/api/scam/callcenter"
 		// Keep the server's session alive on quiet clusters — without
 		// heartbeats, last_push_at only advances when we have actual
 		// events to push, so a stable cluster falls out of the live
@@ -258,21 +261,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ---- initial sorted snapshot per kind ------------------------------
-	collector.DumpPods(podInf)
-	for _, gvr := range gwGVRs {
-		collector.DumpGatewayAPI(gvr, gwInformers[gvr.String()])
+	// ---- initial full-state snapshot -----------------------------------
+	// All tracked kinds emitted together inside a SNAPSHOT_BEGIN/_END
+	// envelope so SPAM can tombstone whatever lingered from before this
+	// process started. SnapshotLoop fires the periodic reconcile.
+	rs := collector.SnapshotResources{
+		Pods:           podInf,
+		Services:       svcInf,
+		EndpointSlices: esInf,
+		Ingresses:      ingInf,
+		IngressClasses: icInf,
+		GatewayAPI:     collector.BuildDynamicSnapshots(gwGVRs, gwInformers),
+		Traefik:        collector.BuildDynamicSnapshots(trGVRs, trInformers),
 	}
-	for _, gvr := range trGVRs {
-		collector.DumpTraefik(gvr, trInformers[gvr.String()])
-	}
-	collector.DumpIngresses(ingInf)
-	collector.DumpIngressClasses(icInf)
-	collector.DumpServices(svcInf)
-	collector.DumpEndpointSlices(esInf)
+	collector.EmitFullSnapshot(rs, "init")
 
 	synced.Store(true)
 	collector.Log.Info("streaming events")
+	go collector.SnapshotLoop(ctx, rs)
+
+	// PushLoop starts here so the ACK-mismatch trigger can fire a
+	// reconcile snapshot against the (now-synced) informer caches —
+	// covers every tracked kind via EmitFullSnapshot, not just
+	// Containers.
+	if pushCapture != nil {
+		go collector.PushLoop(ctx, pushEndpoint, pushCapture, func() {
+			collector.EmitFullSnapshot(rs, "reconcile")
+		})
+	}
 
 	<-ctx.Done()
 	collector.Log.Info("shutdown")

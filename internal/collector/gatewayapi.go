@@ -8,7 +8,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/tools/cache"
 )
 
 var gwAPIGroup = "gateway.networking.k8s.io"
@@ -75,11 +74,6 @@ func GvrStrings(gvrs []schema.GroupVersionResource) []string {
 	return out
 }
 
-func DumpGatewayAPI(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer) {
-	DumpSorted(kindFromResource(gvr.Resource), UnstructuredList(inf), LessUnstructured,
-		func(u *unstructured.Unstructured) int { EmitGatewayAPI("INITIAL", gvr, u); return 1 })
-}
-
 func EmitGatewayAPI(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	switch gvr.Resource {
 	case "gateways":
@@ -100,6 +94,7 @@ func EmitGatewayAPI(event string, gvr schema.GroupVersionResource, u *unstructur
 func EmitGatewayAPIDelete(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info("DELETE",
 		"kind", kindFromResource(gvr.Resource),
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
@@ -124,6 +119,7 @@ type gwAddress struct {
 func emitGateway(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info(event,
 		"kind", "Gateway",
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
@@ -172,6 +168,7 @@ func parseAddresses(obj map[string]any, path ...string) []gwAddress {
 func emitGatewayClass(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info(event,
 		"kind", "GatewayClass",
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"name", u.GetName(),
@@ -203,6 +200,7 @@ type backendRef struct {
 func emitRoute(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured, kind string) {
 	Log.Info(event,
 		"kind", kind,
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),

@@ -8,7 +8,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/tools/cache"
 )
 
 var traefikGroups = []string{"traefik.io", "traefik.containo.us"}
@@ -66,14 +65,10 @@ func wantTraefikResource(name string) bool {
 	return false
 }
 
-func DumpTraefik(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer) {
-	DumpSorted(traefikKindFromResource(gvr.Resource), UnstructuredList(inf), LessUnstructured,
-		func(u *unstructured.Unstructured) int { EmitTraefik("INITIAL", gvr, u); return 1 })
-}
-
 func EmitTraefik(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info(event,
 		"kind", traefikKindFromResource(gvr.Resource),
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
@@ -146,6 +141,7 @@ func TraefikBackends(u *unstructured.Unstructured) []BackendTarget {
 func EmitTraefikDelete(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info("DELETE",
 		"kind", traefikKindFromResource(gvr.Resource),
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),

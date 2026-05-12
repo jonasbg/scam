@@ -6,14 +6,24 @@ import (
 	coreinformers "k8s.io/client-go/informers/core/v1"
 )
 
-// DumpPods emits the initial sorted snapshot for all pods.
-func DumpPods(inf coreinformers.PodInformer) {
+// EmitContainerSnapshot emits per-container INITIAL records plus a
+// SNAPSHOT log line carrying the authoritative pod_uid/container_name
+// key list. The snapshotID groups it with the SNAPSHOT_BEGIN/_END
+// envelope emitted by EmitFullSnapshot.
+func EmitContainerSnapshot(inf coreinformers.PodInformer, snapshotID string) {
 	pods, err := inf.Lister().List(labels.Everything())
 	if err != nil {
-		Log.Error("list pods", "err", err)
+		Log.Error("snapshot: list pods", "err", err)
 		return
 	}
 	DumpSorted("Pod", pods, lessPod, func(p *corev1.Pod) int { return EmitPod("INITIAL", p, nil) })
+	keys := make([]string, 0)
+	for _, p := range pods {
+		for _, c := range collectContainers(p) {
+			keys = append(keys, string(p.UID)+"/"+c.name)
+		}
+	}
+	emitSnapshotKeys(snapshotID, "Container", keys)
 }
 
 func lessPod(a, b *corev1.Pod) bool {
@@ -172,6 +182,7 @@ func EmitPod(event string, p, oldP *corev1.Pod) int {
 		image, registry := SplitImageName(fullRepo)
 		Log.Info(event,
 			"kind", "Container",
+			"event_id", NextEventID(),
 			"namespace", p.Namespace,
 			"pod_uid", string(p.UID),
 			"pod_phase", string(p.Status.Phase),
@@ -211,6 +222,7 @@ func EmitPodDelete(p *corev1.Pod) {
 func emitContainerDelete(ns, podUID, ownerKind, ownerName, podName, ckind, cname string) {
 	Log.Info("DELETE",
 		"kind", "Container",
+		"event_id", NextEventID(),
 		"namespace", ns,
 		"pod_uid", podUID,
 		"owner_kind", ownerKind,

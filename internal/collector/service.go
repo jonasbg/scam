@@ -3,8 +3,6 @@ package collector
 import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	coreinformers "k8s.io/client-go/informers/core/v1"
 )
 
 type svcPort struct {
@@ -14,22 +12,6 @@ type svcPort struct {
 	Protocol   string `json:"protocol,omitempty"`
 	NodePort   int32  `json:"node_port,omitempty"`
 	AppProto   string `json:"app_protocol,omitempty"`
-}
-
-func DumpServices(inf coreinformers.ServiceInformer) {
-	list, err := inf.Lister().List(labels.Everything())
-	if err != nil {
-		Log.Error("list services", "err", err)
-		return
-	}
-	DumpSorted("Service", list,
-		func(a, b *corev1.Service) bool { return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name) },
-		func(s *corev1.Service) int {
-			if EmitService("INITIAL", s) {
-				return 1
-			}
-			return 0
-		})
 }
 
 // EmitService emits a Service record. All services are included so the
@@ -55,6 +37,7 @@ func emitServiceRaw(event string, s *corev1.Service) {
 	lbIPs, lbHosts := lbAddresses(s.Status.LoadBalancer.Ingress)
 	Log.Info(event,
 		"kind", "Service",
+		"event_id", NextEventID(),
 		"uid", string(s.UID),
 		"namespace", s.Namespace,
 		"name", s.Name,
@@ -105,6 +88,7 @@ func EmitServiceForce(event string, s *corev1.Service) {
 func EmitServiceDelete(s *corev1.Service) {
 	Log.Info("DELETE",
 		"kind", "Service",
+		"event_id", NextEventID(),
 		"uid", string(s.UID),
 		"namespace", s.Namespace,
 		"name", s.Name,

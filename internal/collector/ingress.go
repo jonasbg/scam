@@ -2,8 +2,6 @@ package collector
 
 import (
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	netinformers "k8s.io/client-go/informers/networking/v1"
 )
 
 type ingPath struct {
@@ -22,17 +20,6 @@ type ingRule struct {
 type ingTLS struct {
 	Hosts  []string `json:"hosts,omitempty"`
 	Secret string   `json:"secret,omitempty"`
-}
-
-func DumpIngresses(inf netinformers.IngressInformer) {
-	list, err := inf.Lister().List(labels.Everything())
-	if err != nil {
-		Log.Error("list ingresses", "err", err)
-		return
-	}
-	DumpSorted("Ingress", list,
-		func(a, b *networkingv1.Ingress) bool { return nsNameLess(a.Namespace, a.Name, b.Namespace, b.Name) },
-		func(i *networkingv1.Ingress) int { EmitIngress("INITIAL", i); return 1 })
 }
 
 func EmitIngress(event string, i *networkingv1.Ingress) {
@@ -73,6 +60,7 @@ func EmitIngress(event string, i *networkingv1.Ingress) {
 	lbIPs, lbHosts := IngressLbAddresses(i.Status.LoadBalancer.Ingress)
 	Log.Info(event,
 		"kind", "Ingress",
+		"event_id", NextEventID(),
 		"uid", string(i.UID),
 		"namespace", i.Namespace,
 		"name", i.Name,
@@ -88,6 +76,7 @@ func EmitIngress(event string, i *networkingv1.Ingress) {
 func EmitIngressDelete(i *networkingv1.Ingress) {
 	Log.Info("DELETE",
 		"kind", "Ingress",
+		"event_id", NextEventID(),
 		"uid", string(i.UID),
 		"namespace", i.Namespace,
 		"name", i.Name,
@@ -96,20 +85,10 @@ func EmitIngressDelete(i *networkingv1.Ingress) {
 
 // --- IngressClass ---
 
-func DumpIngressClasses(inf netinformers.IngressClassInformer) {
-	list, err := inf.Lister().List(labels.Everything())
-	if err != nil {
-		Log.Error("list ingressclasses", "err", err)
-		return
-	}
-	DumpSorted("IngressClass", list,
-		func(a, b *networkingv1.IngressClass) bool { return a.Name < b.Name },
-		func(ic *networkingv1.IngressClass) int { emitIngressClass("INITIAL", ic); return 1 })
-}
-
 func emitIngressClass(event string, ic *networkingv1.IngressClass) {
 	Log.Info(event,
 		"kind", "IngressClass",
+		"event_id", NextEventID(),
 		"uid", string(ic.UID),
 		"name", ic.Name,
 		"labels", ic.Labels,
@@ -124,6 +103,7 @@ func EmitIngressClass(event string, ic *networkingv1.IngressClass) {
 func EmitIngressClassDelete(ic *networkingv1.IngressClass) {
 	Log.Info("DELETE",
 		"kind", "IngressClass",
+		"event_id", NextEventID(),
 		"uid", string(ic.UID),
 		"name", ic.Name,
 	)
