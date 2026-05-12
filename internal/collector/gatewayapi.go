@@ -8,7 +8,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/tools/cache"
 )
 
 var gwAPIGroup = "gateway.networking.k8s.io"
@@ -73,11 +72,6 @@ func GvrStrings(gvrs []schema.GroupVersionResource) []string {
 		out = append(out, g.GroupVersion().String()+"/"+g.Resource)
 	}
 	return out
-}
-
-func DumpGatewayAPI(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer) {
-	DumpSorted(kindFromResource(gvr.Resource), UnstructuredList(inf), LessUnstructured,
-		func(u *unstructured.Unstructured) int { EmitGatewayAPI("INITIAL", gvr, u); return 1 })
 }
 
 func EmitGatewayAPI(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
