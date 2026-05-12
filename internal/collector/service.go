@@ -55,6 +55,7 @@ func emitServiceRaw(event string, s *corev1.Service) {
 	lbIPs, lbHosts := lbAddresses(s.Status.LoadBalancer.Ingress)
 	Log.Info(event,
 		"kind", "Service",
+		"event_id", NextEventID(),
 		"uid", string(s.UID),
 		"namespace", s.Namespace,
 		"name", s.Name,
@@ -105,6 +106,7 @@ func EmitServiceForce(event string, s *corev1.Service) {
 func EmitServiceDelete(s *corev1.Service) {
 	Log.Info("DELETE",
 		"kind", "Service",
+		"event_id", NextEventID(),
 		"uid", string(s.UID),
 		"namespace", s.Namespace,
 		"name", s.Name,

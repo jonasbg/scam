@@ -74,6 +74,7 @@ func DumpTraefik(gvr schema.GroupVersionResource, inf cache.SharedIndexInformer)
 func EmitTraefik(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info(event,
 		"kind", traefikKindFromResource(gvr.Resource),
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
@@ -146,6 +147,7 @@ func TraefikBackends(u *unstructured.Unstructured) []BackendTarget {
 func EmitTraefikDelete(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info("DELETE",
 		"kind", traefikKindFromResource(gvr.Resource),
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),

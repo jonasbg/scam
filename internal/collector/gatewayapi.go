@@ -100,6 +100,7 @@ func EmitGatewayAPI(event string, gvr schema.GroupVersionResource, u *unstructur
 func EmitGatewayAPIDelete(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info("DELETE",
 		"kind", kindFromResource(gvr.Resource),
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
@@ -124,6 +125,7 @@ type gwAddress struct {
 func emitGateway(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info(event,
 		"kind", "Gateway",
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
@@ -172,6 +174,7 @@ func parseAddresses(obj map[string]any, path ...string) []gwAddress {
 func emitGatewayClass(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	Log.Info(event,
 		"kind", "GatewayClass",
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"name", u.GetName(),
@@ -203,6 +206,7 @@ type backendRef struct {
 func emitRoute(event string, gvr schema.GroupVersionResource, u *unstructured.Unstructured, kind string) {
 	Log.Info(event,
 		"kind", kind,
+		"event_id", NextEventID(),
 		"api_version", gvr.GroupVersion().String(),
 		"uid", string(u.GetUID()),
 		"namespace", u.GetNamespace(),
