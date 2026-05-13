@@ -60,25 +60,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ---- cluster identity (auto-detected from node metadata) ---------------
+	// ---- cluster identity --------------------------------------------------
+	// ROR's clusterinterregator is the primary source; node annotations and
+	// helm-injected env vars are fallbacks when its provider detection can't
+	// classify the cluster (e.g. partial Vitistack annotation sets).
 	ci := clusterinterregator.NewClusterInterregatorFromKubernetesClient(clientset)
 
-	clusterID := ci.GetClusterId()
-	if clusterID == "" || clusterID == "unknown-undefined" || clusterID == "unknown-cluster-id" {
-		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
-			clusterID = string(ns.UID)
-		}
+	nodeList, _ := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	var nodes []corev1.Node
+	if nodeList != nil {
+		nodes = nodeList.Items
+	}
+	var kubeSystemUID string
+	if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
+		kubeSystemUID = string(ns.UID)
 	}
 
-	clusterName := ci.GetClusterName()
-	if clusterName == "" || clusterName == "unknown-undefined" {
-		clusterName = os.Getenv("CLUSTER_NAME")
-	}
-
-	environment := ci.GetEnvironment()
-	if environment == "" || environment == "unknown-undefined" {
-		environment = os.Getenv("ENVIRONMENT")
-	}
+	clusterID := resolveClusterID(ci.GetClusterId(), nodes, kubeSystemUID)
+	clusterName := resolveClusterName(ci.GetClusterName(), nodes)
+	environment := resolveEnvironment(ci.GetEnvironment(), nodes)
 
 	var clusterAttrs []any
 	if clusterName != "" {
@@ -323,6 +323,83 @@ func printBanner(clusterName, clusterID, environment, callcenter string) {
 		fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(l))
 	}
 	fmt.Fprintf(os.Stderr, "\u2514%s\u2518\n", hr)
+}
+
+// ROR sentinel values from
+// github.com/NorskHelsenett/ror/pkg/kubernetes/providers/providermodels.
+// Returned by the unknown provider when nothing classifies.
+func isUnresolvedID(v string) bool {
+	return v == "" || v == "unknown-undefined" || v == "unknown-cluster-id"
+}
+func isUnresolvedName(v string) bool {
+	return v == "" || v == "unknown-undefined" || v == "unknown-cluster"
+}
+func isUnresolvedEnv(v string) bool {
+	return v == "" || v == "unknown-undefined" || v == "unknown-environment"
+}
+
+// resolveClusterID priority:
+//  1. ROR clusterinterregator
+//  2. vitistack.io/clusterid annotation/label on any node
+//  3. kube-system namespace UID (stable per-cluster fingerprint)
+func resolveClusterID(primary string, nodes []corev1.Node, kubeSystemUID string) string {
+	if !isUnresolvedID(primary) {
+		return primary
+	}
+	if v := nodeMeta(nodes, "vitistack.io/clusterid"); v != "" {
+		return v
+	}
+	return kubeSystemUID
+}
+
+// resolveClusterName priority:
+//  1. ROR clusterinterregator
+//  2. vitistack.io/clustername
+//  3. cluster.x-k8s.io/cluster-name (Cluster API standard)
+//  4. ror.io/name
+//  5. CLUSTER_NAME env var (set in helm chart) — may be empty if unset
+func resolveClusterName(primary string, nodes []corev1.Node) string {
+	if !isUnresolvedName(primary) {
+		return primary
+	}
+	for _, key := range []string{
+		"vitistack.io/clustername",
+		"cluster.x-k8s.io/cluster-name",
+		"ror.io/name",
+	} {
+		if v := nodeMeta(nodes, key); v != "" {
+			return v
+		}
+	}
+	return os.Getenv("CLUSTER_NAME")
+}
+
+// resolveEnvironment priority:
+//  1. ROR clusterinterregator
+//  2. vitistack.io/environment (test, prod, etc.)
+//  3. ENVIRONMENT env var — may be empty if unset
+func resolveEnvironment(primary string, nodes []corev1.Node) string {
+	if !isUnresolvedEnv(primary) {
+		return primary
+	}
+	if v := nodeMeta(nodes, "vitistack.io/environment"); v != "" {
+		return v
+	}
+	return os.Getenv("ENVIRONMENT")
+}
+
+// nodeMeta returns the first non-empty value for `key` found in any
+// node's annotations or labels.
+func nodeMeta(nodes []corev1.Node, key string) string {
+	for _, n := range nodes {
+		if v, ok := n.Annotations[key]; ok && v != "" {
+			return v
+		}
+		if v, ok := n.Labels[key]; ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func loadConfig(kubeconfig string) (*rest.Config, error) {
