@@ -33,14 +33,29 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
+// Populated at build time via -ldflags "-X main.version=... -X main.commit=...".
+// See Dockerfile and .github/workflows/build-docker.yml.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 func main() {
-	var kubeconfig string
+	var (
+		kubeconfig  string
+		showVersion bool
+	)
 	defaultKC := ""
 	if h := homedir.HomeDir(); h != "" {
 		defaultKC = filepath.Join(h, ".kube", "config")
 	}
 	flag.StringVar(&kubeconfig, "kubeconfig", defaultKC, "path to kubeconfig (ignored in-cluster)")
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.Parse()
+	if showVersion {
+		fmt.Printf("scam %s (%s)\n", version, commit)
+		return
+	}
 
 	// CALLCENTER_URL is resolved after cluster identity detection so
 	// the push loop can be started with the fully-configured logger.
@@ -90,10 +105,11 @@ func main() {
 	if environment != "" {
 		clusterAttrs = append(clusterAttrs, "environment", environment)
 	}
+	clusterAttrs = append(clusterAttrs, "version", version, "commit", commit)
 	collector.Log = collector.Log.With(clusterAttrs...)
 
 	// ---- startup banner ----------------------------------------------------
-	printBanner(clusterName, clusterID, environment, callcenterURL)
+	printBanner(clusterName, clusterID, environment, callcenterURL, version, commit)
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -294,9 +310,10 @@ func main() {
 	collector.Log.Info("shutdown")
 }
 
-func printBanner(clusterName, clusterID, environment, callcenter string) {
+func printBanner(clusterName, clusterID, environment, callcenter, version, commit string) {
 	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
 	lines := []string{
+		fmt.Sprintf("version:     %s (%s)", version, commit),
 		fmt.Sprintf("cluster:     %s", clusterName),
 		fmt.Sprintf("cluster_id:  %s", clusterID),
 		fmt.Sprintf("environment: %s", environment),
