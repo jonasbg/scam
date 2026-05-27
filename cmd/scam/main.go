@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"unicode/utf8"
 
-	clusterinterregator "github.com/NorskHelsenett/ror/pkg/kubernetes/interregators/clusterinterregator/v2"
 	"github.com/NorskHelsenett/scam/internal/collector"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,14 +32,29 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
+// Populated at build time via -ldflags "-X main.version=... -X main.commit=...".
+// See Dockerfile and .github/workflows/build-docker.yml.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 func main() {
-	var kubeconfig string
+	var (
+		kubeconfig  string
+		showVersion bool
+	)
 	defaultKC := ""
 	if h := homedir.HomeDir(); h != "" {
 		defaultKC = filepath.Join(h, ".kube", "config")
 	}
 	flag.StringVar(&kubeconfig, "kubeconfig", defaultKC, "path to kubeconfig (ignored in-cluster)")
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.Parse()
+	if showVersion {
+		fmt.Printf("scam %s (%s)\n", version, commit)
+		return
+	}
 
 	// CALLCENTER_URL is resolved after cluster identity detection so
 	// the push loop can be started with the fully-configured logger.
@@ -60,25 +74,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ---- cluster identity (auto-detected from node metadata) ---------------
-	ci := clusterinterregator.NewClusterInterregatorFromKubernetesClient(clientset)
-
-	clusterID := ci.GetClusterId()
-	if clusterID == "" || clusterID == "unknown-undefined" || clusterID == "unknown-cluster-id" {
-		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
-			clusterID = string(ns.UID)
+	// ---- cluster identity --------------------------------------------------
+	// See resolveCluster* helpers below for per-field priority.
+	var ror rorIdentity
+	if endpoint := rorEndpoint(); endpoint != "" {
+		if apikey := resolveRorApiKey(clientset); apikey != "" {
+			ror = fetchRorIdentity(endpoint, apikey)
 		}
 	}
 
-	clusterName := ci.GetClusterName()
-	if clusterName == "" || clusterName == "unknown-undefined" {
-		clusterName = os.Getenv("CLUSTER_NAME")
-	}
-
-	environment := ci.GetEnvironment()
-	if environment == "" || environment == "unknown-undefined" {
-		environment = os.Getenv("ENVIRONMENT")
-	}
+	clusterName := resolveClusterName(ror.Name)
+	clusterID := resolveClusterID(func() string {
+		if ns, err := clientset.CoreV1().Namespaces().Get(context.TODO(), "kube-system", metav1.GetOptions{}); err == nil {
+			return string(ns.UID)
+		}
+		return ""
+	})
+	environment := resolveEnvironment(ror.Environment)
 
 	var clusterAttrs []any
 	if clusterName != "" {
@@ -90,10 +102,33 @@ func main() {
 	if environment != "" {
 		clusterAttrs = append(clusterAttrs, "environment", environment)
 	}
+	// ror_metadata is a nested group, emitted only when ROR lookup
+	// succeeded. SPAM joins on top-level cluster_id (kube-system UID)
+	// regardless, and uses ror_metadata.cluster_id to map the cluster
+	// onto ROR's ACL/display when present.
+	if ror.Slug != "" {
+		clusterAttrs = append(clusterAttrs, slog.Group("ror_metadata",
+			"cluster_id", ror.Slug,
+			"cluster_name", ror.Name,
+			"env", ror.Environment,
+		))
+	}
+	clusterAttrs = append(clusterAttrs, "version", version, "commit", commit)
+
+	// LineCapture + JSON handler get installed here when CALLCENTER_URL is
+	// set so every subsequent log line (informer setup, cache sync, the
+	// initial snapshot) is buffered for push. PushLoop itself starts later
+	// — once podInf exists — so the ACK-mismatch trigger has a snapshot
+	// target to fire.
+	var pushCapture *collector.LineCapture
+	if callcenterURL != "" {
+		pushCapture = &collector.LineCapture{Stdout: os.Stdout}
+		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(pushCapture), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
 	collector.Log = collector.Log.With(clusterAttrs...)
 
 	// ---- startup banner ----------------------------------------------------
-	printBanner(clusterName, clusterID, environment, callcenterURL)
+	printBanner(clusterName, clusterID, environment, ror.Slug, callcenterURL, version, commit)
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -109,16 +144,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// LineCapture + logger get set up here so every subsequent log line
-	// (informer setup, cache sync, the initial snapshot) is buffered for
-	// push. PushLoop itself starts later — once podInf exists — so the
-	// ACK-mismatch trigger has a snapshot target to fire.
-	var pushCapture *collector.LineCapture
 	var pushEndpoint string
 	if callcenterURL != "" {
-		pushCapture = &collector.LineCapture{Stdout: os.Stdout}
-		collector.Log = slog.New(slog.NewJSONHandler(io.Writer(pushCapture), &slog.HandlerOptions{Level: slog.LevelInfo}))
-		collector.Log = collector.Log.With(clusterAttrs...)
 		base := strings.TrimRight(callcenterURL, "/")
 		pushEndpoint = base + "/api/scam/callcenter"
 		// Keep the server's session alive on quiet clusters — without
@@ -294,14 +321,21 @@ func main() {
 	collector.Log.Info("shutdown")
 }
 
-func printBanner(clusterName, clusterID, environment, callcenter string) {
+// rorSlug is included as a separate banner line (when non-empty) so an
+// operator can tell at a glance whether the ROR binding succeeded \u2014
+// cluster_id is always the kube-system UID now and won't reveal that.
+func printBanner(clusterName, clusterID, environment, rorSlug, callcenter, version, commit string) {
 	title := "SCAM \u2014 SPAM Cluster Agent Metadata"
 	lines := []string{
+		fmt.Sprintf("version:     %s (%s)", version, commit),
 		fmt.Sprintf("cluster:     %s", clusterName),
 		fmt.Sprintf("cluster_id:  %s", clusterID),
 		fmt.Sprintf("environment: %s", environment),
-		fmt.Sprintf("callcenter:  %s", callcenter),
 	}
+	if rorSlug != "" {
+		lines = append(lines, fmt.Sprintf("ror_slug:    %s", rorSlug))
+	}
+	lines = append(lines, fmt.Sprintf("callcenter:  %s", callcenter))
 
 	maxW := utf8.RuneCountInString(title)
 	for _, l := range lines {
@@ -323,6 +357,45 @@ func printBanner(clusterName, clusterID, environment, callcenter string) {
 		fmt.Fprintf(os.Stderr, "\u2502 %s \u2502\n", pad(l))
 	}
 	fmt.Fprintf(os.Stderr, "\u2514%s\u2518\n", hr)
+}
+
+// resolveClusterName priority:
+//  1. ROR cluster object's display name (when fetched)
+//  2. CLUSTER_NAME env var (set in helm chart) — may be empty if unset
+func resolveClusterName(rorName string) string {
+	if rorName != "" {
+		return rorName
+	}
+	return os.Getenv("CLUSTER_NAME")
+}
+
+// resolveClusterID priority:
+//  1. CLUSTER_ID env var (explicit override)
+//  2. kube-system namespace UID — the Kubernetes-canonical
+//     "this install" fingerprint (k8s.cluster.uid); stable for the
+//     cluster's lifespan and the join key SPAM uses across sources.
+//
+// The ROR slug is intentionally *not* part of this chain — it's ROR
+// binding metadata, not cluster identity, and is emitted separately
+// under ror_metadata.cluster_id.
+//
+// kubeSystemUID is a thunk so the API call is skipped when CLUSTER_ID
+// already satisfies the lookup.
+func resolveClusterID(kubeSystemUID func() string) string {
+	if v := strings.TrimSpace(os.Getenv("CLUSTER_ID")); v != "" {
+		return v
+	}
+	return kubeSystemUID()
+}
+
+// resolveEnvironment priority:
+//  1. ROR cluster object's environment field (when fetched successfully)
+//  2. ENVIRONMENT env var — may be empty if unset
+func resolveEnvironment(rorEnv string) string {
+	if rorEnv != "" {
+		return rorEnv
+	}
+	return os.Getenv("ENVIRONMENT")
 }
 
 func loadConfig(kubeconfig string) (*rest.Config, error) {

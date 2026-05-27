@@ -9,6 +9,31 @@ clusterName: ""
 environment: ""
 callcenter: "https://spam.sikkerhet.nhn.no"
 
+# ROR API identity lookup. Resolves the cluster name and environment
+# from the ROR API (V2 Self() + /v1/clusters/<slug>) using a
+# cluster-scoped apikey, falling back to CLUSTER_NAME env / kube-system
+# UID if anything fails. Enabled by default for NHN's central setup
+# where the apikey Secret lives in `nhn-ror`; flip to false in
+# environments without a ROR binding to silence the not-found warning.
+ror:
+  enabled: true
+  # Override the default ROR endpoint. Empty → https://api.ror.nhn.no.
+  endpoint: ""
+  # Literal apikey value. Prefer apiKeySecret unless you really want
+  # the key inlined in the Release.
+  apiKey: ""
+  # Read the apikey from an existing Secret. Defaults point at NHN's
+  # central ROR namespace (`nhn-ror`) where the cluster-scoped apikey
+  # actually lives — set `namespace: ""` to fall back to the release
+  # namespace, or override to wherever a co-located apikey is stored.
+  # The chart provisions a cluster-scoped ClusterRole+ClusterRoleBinding
+  # granting `get` on Secrets whose name matches `apiKeySecret.name` —
+  # the chart never has to create resources in the apikey's own namespace.
+  apiKeySecret:
+    namespace: "nhn-ror"
+    name: ror-apikey
+    key: APIKEY
+
 resources:
   requests:
     cpu: 10m

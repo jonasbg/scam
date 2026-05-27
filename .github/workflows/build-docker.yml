@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -36,21 +37,29 @@ jobs:
         with:
           registry: ${{ steps.registry.outputs.registry }}
           username: ${{ github.actor }}
-          password: ${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}
+          password: ${{ secrets.PACKAGES_TOKEN || github.token }}
 
-      - name: Determine image tags
-        id: tags
+      - name: Resolve image name
+        id: image
         run: |
           IMAGE="${{ steps.registry.outputs.registry }}/${{ github.repository }}"
           IMAGE=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            TAGS="${IMAGE}:latest,${IMAGE}:$(date '+%Y%m%d')"
-          else
-            TAGS="${IMAGE}:dev"
-          fi
-          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
-          echo "cache=${IMAGE}:buildcache" >> $GITHUB_OUTPUT
           echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "cache=${IMAGE}:buildcache" >> $GITHUB_OUTPUT
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=scam
+            org.opencontainers.image.description=SPAM Cluster Agent Metadata
 
       - name: Build and push image
         id: build
@@ -59,17 +68,13 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          labels: |
-            build.buildnumber=${{ github.run_id }}
-            build.builduri=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            build.project.uri=${{ github.server_url }}/${{ github.repository }}
-            build.project.name=${{ github.repository }}
-            build.repository.name=${{ github.event.repository.name }}
-            build.repository.branch=${{ github.ref_name }}
-            build.repository.commithash=${{ github.sha }}
-          cache-from: type=registry,ref=${{ steps.tags.outputs.cache }}
-          cache-to: type=registry,ref=${{ steps.tags.outputs.cache }},mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.cache }}
+          cache-to: type=registry,ref=${{ steps.image.outputs.cache }},mode=max
 
   helm-push:
     runs-on: ubuntu-latest
@@ -101,25 +106,19 @@ jobs:
 
       - name: Log in to Helm Registry
         run: |
-          echo "${{ secrets.REGISTRY_ACCESS_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
+          echo "${{ secrets.PACKAGES_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
 
       - name: Determine Helm repository
         id: helm-repo
         run: |
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "repo=${REPO}" >> $GITHUB_OUTPUT
-            echo "tag_suffix=$(date '+%Y%m%d')" >> $GITHUB_OUTPUT
-          else
-            echo "repo=${REPO}" >> $GITHUB_OUTPUT
-            echo "tag_suffix=dev" >> $GITHUB_OUTPUT
-          fi
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
 
       - name: Update and push Helm chart
         env:
           REGISTRY: ${{ steps.registry.outputs.registry }}
           IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
-          TAG_SUFFIX: ${{ steps.helm-repo.outputs.tag_suffix }}
+          IMAGE_VERSION: ${{ needs.build.outputs.version }}
           HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
         run: |
           CHART_DIR=".cluster/scam"
@@ -145,7 +144,7 @@ jobs:
 
           # Update values.yaml with image repository, tag, and digest
           IMAGE_REPO="${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
-          IMAGE_TAG="${TAG_SUFFIX}@${IMAGE_DIGEST}"
+          IMAGE_TAG="${IMAGE_VERSION}@${IMAGE_DIGEST}"
           yq e -i ".image.repository = \"$IMAGE_REPO\"" ${CHART_DIR}/values.yaml
           yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
 
@@ -153,3 +152,72 @@ jobs:
           # so pushing to oci://registry/org/scam with name=helm lands at scam/helm
           helm package ${CHART_DIR}
           helm push "${OCI_NAME}-${NEW_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
+
+  helm-push-dev:
+    runs-on: ubuntu-latest
+    needs: [build]
+    # Dev chart from every non-main push. PRs are skipped (they don't
+    # have access to write secrets anyway).
+    if: github.ref != 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Determine registry
+        id: registry
+        run: |
+          SERVER_URL="${{ github.server_url }}"
+          HOST=$(echo "$SERVER_URL" | sed 's|https\?://||')
+          if [ "$HOST" = "github.com" ]; then
+            REGISTRY="ghcr.io"
+          else
+            REGISTRY="$HOST"
+          fi
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+
+      - name: Install Helm
+        uses: azure/setup-helm@5119fcb9089d432beecbf79bb2c7915207344b78 # v3
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Log in to Helm Registry
+        run: |
+          echo "${{ secrets.PACKAGES_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
+
+      - name: Determine Helm repository
+        id: helm-repo
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+
+      - name: Package and push dev Helm chart
+        env:
+          REGISTRY: ${{ steps.registry.outputs.registry }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE_VERSION: ${{ needs.build.outputs.version }}
+          HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
+        run: |
+          CHART_DIR=".cluster/scam"
+          OCI_NAME="helm-dev"
+
+          # SemVer prerelease identifiers must match [0-9A-Za-z-]+.
+          # Branch slug: flatten /, _, and anything else into '-'.
+          SLUG=$(echo "${GITHUB_REF_NAME}" | sed 's/[^A-Za-z0-9-]/-/g')
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          DEV_VERSION="0.0.0-${SLUG}.${SHORT_SHA}"
+
+          echo "DEV CHART VERSION: $DEV_VERSION"
+
+          yq e -i ".name = \"$OCI_NAME\" | .version = \"$DEV_VERSION\"" ${CHART_DIR}/Chart.yaml
+
+          # Pin the dev chart at the exact image this build produced.
+          IMAGE_REPO="${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE_TAG="${IMAGE_VERSION}@${IMAGE_DIGEST}"
+          yq e -i ".image.repository = \"$IMAGE_REPO\"" ${CHART_DIR}/values.yaml
+          yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
+
+          helm package ${CHART_DIR}
+          helm push "${OCI_NAME}-${DEV_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
