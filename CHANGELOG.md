@@ -8,6 +8,12 @@ release. Bump it (and write the notes) in a PR; when that PR merges to
 section as the notes, plus the matching image and Helm chart. You never
 create tags by hand.
 
+## [0.3.0] - 2026-06-17
+
+### CI
+
+- Demonstrate the changelog guard passing on a real version bump.
+
 ## [0.2.0] - 2026-06-16
 
 ### Features
