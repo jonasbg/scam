@@ -26,3 +26,6 @@ create tags by hand.
 - CHANGELOG-driven releases: merging a version bump to `main` tags and
   publishes the release; the shared reusable build powers both dev and
   release image builds.
+- PR guard (`changelog-check`): every PR into `main` must add a new,
+  unreleased `## [X.Y.Z]` section, so a release tag can never be
+  overwritten or silently skipped.
