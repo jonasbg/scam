@@ -1,0 +1,115 @@
+name: Release Please
+
+# Full release automation. On every push to main, release-please reads the
+# conventional-commit history and maintains a "release PR" that bumps the
+# version and updates CHANGELOG.md. Merging that PR creates the git tag +
+# GitHub Release (with categorized notes), which then drives the stable
+# image build and Helm chart publish below — all in this one run, so it
+# works with the default GITHUB_TOKEN (no PAT needed).
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - name: Run release-please
+        id: rp
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Stable image, only once a release was actually created.
+  build-release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      semver: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
+
+  # Stable Helm chart pinned at the released image (tag@digest).
+  helm-release:
+    needs: [release-please, build-release]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+      REGISTRY_IMAGE: ${{ needs.build-release.outputs.image }}
+      IMAGE_VERSION: ${{ needs.build-release.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-release.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Determine registry
+        id: registry
+        run: |
+          SERVER_URL="${{ github.server_url }}"
+          HOST=$(echo "$SERVER_URL" | sed 's|https\?://||')
+          if [ "$HOST" = "github.com" ]; then
+            REGISTRY="ghcr.io"
+          else
+            REGISTRY="$HOST"
+          fi
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+
+      - name: Install Helm
+        uses: azure/setup-helm@5119fcb9089d432beecbf79bb2c7915207344b78 # v3
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Log in to Helm Registry
+        run: |
+          echo "${{ secrets.PACKAGES_TOKEN || github.token }}" | helm registry login ${{ steps.registry.outputs.registry }} -u "${{ github.actor }}" --password-stdin
+
+      - name: Determine Helm repository
+        id: helm-repo
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+
+      - name: Update and push Helm chart
+        env:
+          HELM_REPO: ${{ steps.helm-repo.outputs.repo }}
+        run: |
+          CHART_DIR=".cluster/scam"
+          OCI_NAME="helm"
+
+          # The release tag drives both versions: chart version must be
+          # SemVer (strip the leading v), appVersion carries the human
+          # v-prefixed tag.
+          CHART_VERSION="${RELEASE_TAG#v}"      # v0.2.2 -> 0.2.2
+          echo "RELEASE: tag=${RELEASE_TAG} chart=${CHART_VERSION}"
+
+          yq e -i ".name = \"$OCI_NAME\" | .version = \"$CHART_VERSION\" | .appVersion = \"$RELEASE_TAG\"" ${CHART_DIR}/Chart.yaml
+
+          # Pin the image at the exact tag@digest this release produced.
+          IMAGE_TAG="${IMAGE_VERSION}@${IMAGE_DIGEST}"
+          yq e -i ".image.repository = \"$REGISTRY_IMAGE\"" ${CHART_DIR}/values.yaml
+          yq e -i ".image.tag = \"$IMAGE_TAG\"" ${CHART_DIR}/values.yaml
+
+          # helm appends the chart name from Chart.yaml, so pushing to
+          # oci://registry/org/scam with name=helm lands at scam/helm.
+          helm package ${CHART_DIR}
+          helm push "${OCI_NAME}-${CHART_VERSION}.tgz" oci://${REGISTRY}/${HELM_REPO}
